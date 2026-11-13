@@ -14,7 +14,8 @@ import {
 } from './socialapi.js';
 import { createZernioPost, listRecentPosts as listRecentZernioPosts } from './zernio.js';
 import { modelFor, forgetModel, isModelError } from './models.js';
-import { persistImage, persistImages, storeImage } from './imagestore.js';
+import { persistImage, persistImages, storeImage, imageStoreEnabled } from './imagestore.js';
+import sharp from 'sharp';
 import { designSlides, canDesign } from './designer.js';
 import { pickRecipe, recipeBrief, occasionFor } from './recipes.js';
 import { fetchGeneratedImage } from './imagehost.js';
@@ -423,7 +424,7 @@ const WRITERS = {
 
 // The order providers are tried in. The first one with a key wins; the rest
 // are fallbacks, so a rate-limited provider does not stop a post going out.
-export const WRITER_ORDER = ['groq', 'openai', 'gemini', 'anthropic'];
+export const WRITER_ORDER = ['openai', 'groq', 'gemini', 'anthropic'];
 
 async function callWriter(kind, prompts) {
   try {
@@ -743,11 +744,54 @@ async function warmOnce(url, timeoutMs) {
   }
 }
 
+// OpenAI image generation for accounts with an OpenAI API key. Unlike a
+// Pollinations prompt URL, OpenAI returns image bytes. Keep the exact approved
+// image in public Blob storage so Instagram and other platforms can fetch it.
+// With no OpenAI key, the original Pollinations workflow remains available.
+async function generateOpenAIImage(imagePrompt, dims, apiKey) {
+  if (!imageStoreEnabled()) {
+    throw new Error('OpenAI image generation requires a public Vercel Blob store (BLOB_READ_WRITE_TOKEN).');
+  }
+  const requestedSize = dims.height > dims.width * 1.15
+    ? '1024x1536'
+    : dims.width > dims.height * 1.15 ? '1536x1024' : '1024x1024';
+  const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1-mini';
+  const response = await fetch('https://api.openai.com/v1/images/generations', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      prompt: imagePrompt,
+      size: requestedSize,
+      quality: 'low',
+      n: 1,
+    }),
+    signal: AbortSignal.timeout(45000),
+  });
+  const json = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`OpenAI image generation failed (HTTP ${response.status}): ${json?.error?.message || 'check image API access and billing'}`);
+  }
+  const encoded = json?.data?.[0]?.b64_json;
+  if (!encoded) throw new Error('OpenAI did not return image bytes; cannot create a stable publication image.');
+  const buffer = await sharp(Buffer.from(encoded, 'base64'))
+    .resize(dims.width, dims.height, { fit: 'cover', position: 'centre' })
+    .jpeg({ quality: 88, mozjpeg: true })
+    .toBuffer();
+  const imageUrl = await storeImage(buffer, `openai-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  return { imageUrl, model, buffer, bytes: buffer.length, width: dims.width, height: dims.height };
+}
+
 // Generates an image URL, warming it. Falls back to the faster 'turbo' model
 // (still a URL, which platforms require) if flux is slow or failing.
 // `models` pins the attempt order — carousels pass a single model so every
 // slide is rendered by the same one.
 export async function generateImage(imagePrompt, dims, { models = ['flux', 'turbo'], seed } = {}) {
+  const openaiKey = await keyFor('openai');
+  if (openaiKey) return generateOpenAIImage(imagePrompt, dims, openaiKey);
   let lastError = null;
   for (const model of models) {
     const url = buildImageUrl(imagePrompt, { ...dims, model, seed });
