@@ -52,6 +52,6 @@ export const config = {
     // Everything except Next's own assets, the auth endpoints, the render and
     // cron endpoints (which authenticate with their own tokens, not a session),
     // and the click tracker (which must work for people who are not users).
-    '/((?!api/auth|api/cron|api/render|api/scheduler|r/|_next/static|_next/image|favicon.ico|.*\\.(?:png|jpg|jpeg|svg|ico|webp|mp4|woff2?)$).*)',
+    '/((?!api/auth|api/signup|api/cron|api/render|api/scheduler|r/|_next/static|_next/image|favicon.ico|.*\\.(?:png|jpg|jpeg|svg|ico|webp|mp4|woff2?)$).*)',
   ],
 };
